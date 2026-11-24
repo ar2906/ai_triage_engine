@@ -1,4 +1,6 @@
 .venv/
-__pycache__/
-logs/*.jsonl
 .env
+__pycache__/
+*.py[cod]
+logs/*.jsonl
+.pytest_cache/
