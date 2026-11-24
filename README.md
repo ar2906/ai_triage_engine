@@ -1,11 +1,14 @@
-Autonomous Production Incident & Regression Triage Engine
+# Autonomous Production Incident & Regression Triage Engine
 
-An autonomous Site Reliability Engineering (SRE) triage prototype that detects failing production requests via OpenTelemetry traces, correlates stack traces against recent Git commit diffs using Model Context Protocol (MCP) tool servers, verifies candidate fixes in an isolated pytest sandbox, and stages verified patches onto dedicated fix/ Git branches.
+An autonomous Site Reliability Engineering (SRE) triage prototype that detects failing production requests via OpenTelemetry traces, correlates stack traces against recent Git commit diffs using Model Context Protocol (MCP) tool servers, verifies candidate fixes in an isolated `pytest` sandbox, and stages verified patches onto dedicated `fix/` Git branches.
 
-Architecture Overview
+---
+
+## Architecture Overview
 
 The system separates reasoning, telemetry access, version control operations, and patch verification across four decoupled local services:
 
+```text
 ┌─────────────────────────┐       ┌──────────────────────────────────┐
 │  Target Microservice    │──────▶│      logs/traces.jsonl           │
 │  (FastAPI :8090)        │ OTel  │  (OpenTelemetry Span Export)     │
@@ -33,22 +36,21 @@ The system separates reasoning, telemetry access, version control operations, an
 │  Isolated Pytest Sandbox│
 │  (orchestrator/sandbox) │
 └─────────────────────────┘
+```
 
+### Core Components
 
-Core Components
+* **Target Microservice (`target_app/main.py` — Port `8090`):** A FastAPI Orders service instrumented with OpenTelemetry (`FastAPIInstrumentor` + custom `JsonlFileSpanExporter`) that records request spans, attributes, and exceptions to `logs/traces.jsonl`.
+* **Observability MCP Server (`mcp_servers/observability_mcp.py` — Port `8001`):** A Streamable HTTP `FastMCP` server exposing read-only telemetry lookup tools (`get_trace_by_id`, `search_recent_errors`).
+* **VCS & Code MCP Server (`mcp_servers/vcs_mcp.py` — Port `8002`):** A Streamable HTTP `FastMCP` server exposing Git history inspection (`get_recent_commits`, `get_commit_diff`, `read_source_file`) and a guardrailed `stage_fix_branch` tool that enforces `fix/` branch naming prefixes.
+* **Isolated Sandbox Verifier (`orchestrator/sandbox.py`):** Copies the candidate code patch and generated regression test into an ephemeral temporary directory and executes `pytest` before allowing any Git commits.
+* **LangGraph Orchestrator (`orchestrator/graph.py` & `orchestrator/main.py` — Port `8000`):** Coordinates the stateful triage graph (`TriageState`), connecting Claude (`claude-sonnet-4-5`) to both MCP servers via the official `mcp` Python SDK.
 
-Target Microservice (target_app/main.py — Port 8090): A FastAPI Orders service instrumented with OpenTelemetry (FastAPIInstrumentor + custom JsonlFileSpanExporter) that records request spans, attributes, and exceptions to logs/traces.jsonl.
+---
 
-Observability MCP Server (mcp_servers/observability_mcp.py — Port 8001): A Streamable HTTP FastMCP server exposing read-only telemetry lookup tools (get_trace_by_id, search_recent_errors).
+## Project Structure
 
-VCS & Code MCP Server (mcp_servers/vcs_mcp.py — Port 8002): A Streamable HTTP FastMCP server exposing Git history inspection (get_recent_commits, get_commit_diff, read_source_file) and a guardrailed stage_fix_branch tool that enforces fix/ branch naming prefixes.
-
-Isolated Sandbox Verifier (orchestrator/sandbox.py): Copies the candidate code patch and generated regression test into an ephemeral temporary directory and executes pytest before allowing any Git commits.
-
-LangGraph Orchestrator (orchestrator/graph.py & orchestrator/main.py — Port 8000): Coordinates the stateful triage graph (TriageState), connecting Claude (claude-sonnet-4-5) to both MCP servers via the official mcp Python SDK.
-
-Project Structure
-
+```text
 sre-triage-engine/
 ├── target_app/
 │   └── main.py                 # FastAPI Orders microservice with OpenTelemetry tracing
@@ -63,75 +65,74 @@ sre-triage-engine/
 ├── .env                        # Environment variables (ANTHROPIC_API_KEY, gitignored)
 ├── pyproject.toml              # Project dependencies managed with uv
 └── README.md
+```
 
+---
 
-Prerequisites & Setup
+## Prerequisites & Setup
 
-Python 3.12+ and uv installed.
+1. **Python 3.12+** and **[uv](https://docs.astral.sh/uv/)** installed.
+2. **Anthropic API Key** configured in a `.env` file at the project root:
+   ```env
+   ANTHROPIC_API_KEY=sk-ant-your-key-here
+   ```
+3. **Install dependencies:**
+   ```bash
+   uv sync
+   ```
 
-Anthropic API Key configured in a .env file at the project root:
+---
 
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-
-
-Install dependencies:
-
-uv sync
-
-
-Running the Services
+## Running the Services
 
 Start each service in its own terminal tab from the repository root:
 
-Target Orders Microservice (Port 8090):
+1. **Target Orders Microservice (Port `8090`):**
+   ```bash
+   uv run uvicorn target_app.main:app --port 8090
+   ```
+2. **Observability MCP Server (Port `8001`):**
+   ```bash
+   uv run uvicorn mcp_servers.observability_mcp:app --port 8001
+   ```
+3. **VCS & Code MCP Server (Port `8002`):**
+   ```bash
+   uv run uvicorn mcp_servers.vcs_mcp:app --port 8002
+   ```
+4. **SRE Triage Orchestrator (Port `8000`):**
+   ```bash
+   uv run uvicorn orchestrator.main:app --port 8000
+   ```
 
-uv run uvicorn target_app.main:app --port 8090
+---
 
+## End-to-End Triage Demo
 
-Observability MCP Server (Port 8001):
+1. **Trigger a production failure** (e.g., submitting an order without a `coupon` object when null-safety checks are missing):
+   ```powershell
+   try {
+       Invoke-RestMethod -Uri "http://127.0.0.1:8090/orders" -Method Post -ContentType "application/json" -Body '{"order_id": "ORD-999", "amount": 50.0}'
+   } catch {
+       Write-Host "Triggered 500 error as expected!"
+   }
+   ```
+2. **Extract the failing `trace_id` and dispatch it to the orchestrator:**
+   ```powershell
+   $failingTrace = (Get-Content logs/traces.jsonl | ConvertFrom-Json | Where-Object { $_.status -eq "ERROR" } | Select-Object -Last 1).trace_id
 
-uv run uvicorn mcp_servers.observability_mcp:app --port 8001
+   Invoke-RestMethod -Uri "http://127.0.0.1:8000/incidents/triage" -Method Post -ContentType "application/json" -Body "{`"trace_id`": `"$failingTrace`", `"service_name`": `"orders-service`"}"
+   ```
+3. **Inspect the staged patch branch:**
+   ```bash
+   git branch
+   git show --stat
+   git diff HEAD~1
+   ```
 
+---
 
-VCS & Code MCP Server (Port 8002):
+## Safety Guardrails
 
-uv run uvicorn mcp_servers.vcs_mcp:app --port 8002
-
-
-SRE Triage Orchestrator (Port 8000):
-
-uv run uvicorn orchestrator.main:app --port 8000
-
-
-End-to-End Triage Demo
-
-Trigger a production failure (e.g., submitting an order without a coupon object when null-safety checks are missing):
-
-try {
-    Invoke-RestMethod -Uri "http://127.0.0.1:8090/orders" -Method Post -ContentType "application/json" -Body '{"order_id": "ORD-999", "amount": 50.0}'
-} catch {
-    Write-Host "Triggered 500 error as expected!"
-}
-
-
-Extract the failing trace_id and dispatch it to the orchestrator:
-
-$failingTrace = (Get-Content logs/traces.jsonl | ConvertFrom-Json | Where-Object { $_.status -eq "ERROR" } | Select-Object -Last 1).trace_id
-
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/incidents/triage" -Method Post -ContentType "application/json" -Body "{`"trace_id`": `"$failingTrace`", `"service_name`": `"orders-service`"}"
-
-
-Inspect the staged patch branch:
-
-git branch
-git show --stat
-git diff HEAD~1
-
-
-Safety Guardrails
-
-Read-Only Telemetry & Code Analysis: Investigation agents only have access to read-only MCP tools during diagnosis.
-
-Mandatory Sandbox Gate: stage_branch is skipped unless pytest exits with status 0 inside the isolated sandbox directory.
-
-Branch Prefix Enforcement: stage_fix_branch rejects any branch name that does not start with fix/, preventing direct commits to main.
+* **Read-Only Telemetry & Code Analysis:** Investigation agents only have access to read-only MCP tools during diagnosis.
+* **Mandatory Sandbox Gate:** `stage_branch` is skipped unless `pytest` exits with status `0` inside the isolated sandbox directory.
+* **Branch Prefix Enforcement:** `stage_fix_branch` rejects any branch name that does not start with `fix/`, preventing direct commits to `main`.
