@@ -47,8 +47,6 @@ def create_order(order: OrderRequest):
         span.set_attribute("order.payload", order.model_dump_json())
 
         discount = 0.0
-        if order.coupon and "percent" in order.coupon:
-            discount = order.amount * (order.coupon["percent"] / 100.0)
-
+        discount = order.amount * (order.coupon["percent"] / 100.0)
         final_total = round(order.amount - discount, 2)
         return {"order_id": order.order_id, "final_total": final_total}
